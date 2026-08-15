@@ -1295,7 +1295,6 @@ public class ResidenceManager implements ResidenceInterface {
         residences.clear();
 
         int loadWorkerCount = Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
-        ExecutorService executorService = Executors.newFixedThreadPool(loadWorkerCount);
 
         try {
             for (Entry<String, Object> worldSet : root.entrySet()) {
@@ -1309,12 +1308,15 @@ public class ResidenceManager implements ResidenceInterface {
                 if (!plugin.isDisabledWorld(worldName) && !plugin.getConfigManager().CleanerStartupLog)
                     lm.consoleMessage("Loading " + worldName + " data into memory...");
                 if (reslist != null) {
+                    ExecutorService executorService = Executors.newFixedThreadPool(loadWorkerCount);
                     try {
                         chunkResidences.put(worldName, multithreadLoadMap(worldName, reslist, executorService, loadWorkerCount));
                     } catch (Exception ex) {
                         lm.consoleMessage("Error in loading save file for world: " + worldName);
                         if (plugin.getConfigManager().stopOnSaveError())
                             throw (ex);
+                    } finally {
+                        executorService.shutdown();
                     }
                 }
 
@@ -1326,7 +1328,6 @@ public class ResidenceManager implements ResidenceInterface {
                             + " residences");
             }
         } finally {
-            executorService.shutdown();
             clearLoadChache();
         }
     }
