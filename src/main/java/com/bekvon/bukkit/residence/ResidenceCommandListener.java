@@ -4,7 +4,10 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -30,6 +33,8 @@ import net.Zrips.CMILib.RawMessages.RawMessage;
 public class ResidenceCommandListener implements CommandExecutor {
 
     private static List<String> adminCommands = new ArrayList<String>();
+    private static final Map<String, CommandHandler> commandHandlers = new ConcurrentHashMap<String, CommandHandler>();
+    private static final Map<String, Boolean> missingCommands = new ConcurrentHashMap<String, Boolean>();
     private static final String label = "res";
 
     public String getLabel() {
@@ -173,7 +178,12 @@ public class ResidenceCommandListener implements CommandExecutor {
                 break;
             }
 
-            cmd cmdClass = getCmdClass(args);
+            CommandHandler commandHandler = getCommandHandler(args[0]);
+            if (commandHandler == null) {
+                return commandHelp(new String[] { "?" }, resadmin, sender, command);
+            }
+
+            cmd cmdClass = commandHandler.newInstance();
             if (cmdClass == null) {
                 return commandHelp(new String[] { "?" }, resadmin, sender, command);
             }
@@ -196,10 +206,7 @@ public class ResidenceCommandListener implements CommandExecutor {
 
             String[] targ = reduceArgs(args);
 
-            for (Method met : cmdClass.getClass().getMethods()) {
-                if (!met.isAnnotationPresent(CommandAnnotation.class))
-                    continue;
-                CommandAnnotation cs = met.getAnnotation(CommandAnnotation.class);
+            for (CommandAnnotation cs : commandHandler.getAnnotations()) {
 
                 varCheck: if (sender instanceof Player) {
                     int[] regVar = cs.regVar();
@@ -314,17 +321,62 @@ public class ResidenceCommandListener implements CommandExecutor {
     }
 
     private static cmd getCmdClass(String[] args) {
-        cmd cmdClass = null;
+        CommandHandler handler = getCommandHandler(args[0]);
+        return handler == null ? null : handler.newInstance();
+    }
+
+    private static CommandHandler getCommandHandler(String commandName) {
+        commandName = commandName.toLowerCase();
+        CommandHandler cached = commandHandlers.get(commandName);
+        if (cached != null)
+            return cached;
+        if (missingCommands.containsKey(commandName))
+            return null;
+
         try {
-            Class<?> nmsClass;
-            nmsClass = Class.forName("com.bekvon.bukkit.residence.commands." + args[0].toLowerCase());
-            if (cmd.class.isAssignableFrom(nmsClass)) {
-                cmdClass = (cmd) nmsClass.getConstructor().newInstance();
+            Class<?> loadedClass = Class.forName(Residence.getInstance().getCommandFiller().packagePath + "." + commandName);
+            if (!cmd.class.isAssignableFrom(loadedClass)) {
+                missingCommands.put(commandName, Boolean.TRUE);
+                return null;
             }
-        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | IllegalArgumentException | InvocationTargetException | NoSuchMethodException
-                | SecurityException e) {
+
+            Class<? extends cmd> commandClass = loadedClass.asSubclass(cmd.class);
+            List<CommandAnnotation> annotations = new ArrayList<CommandAnnotation>();
+            for (Method method : commandClass.getMethods()) {
+                CommandAnnotation annotation = method.getAnnotation(CommandAnnotation.class);
+                if (annotation != null)
+                    annotations.add(annotation);
+            }
+
+            CommandHandler handler = new CommandHandler(commandClass, Collections.unmodifiableList(annotations));
+            CommandHandler previous = commandHandlers.putIfAbsent(commandName, handler);
+            return previous == null ? handler : previous;
+        } catch (ClassNotFoundException | SecurityException e) {
+            missingCommands.put(commandName, Boolean.TRUE);
+            return null;
         }
-        return cmdClass;
+    }
+
+    private static final class CommandHandler {
+        private final Class<? extends cmd> commandClass;
+        private final List<CommandAnnotation> annotations;
+
+        private CommandHandler(Class<? extends cmd> commandClass, List<CommandAnnotation> annotations) {
+            this.commandClass = commandClass;
+            this.annotations = annotations;
+        }
+
+        private cmd newInstance() {
+            try {
+                return commandClass.getConstructor().newInstance();
+            } catch (InstantiationException | IllegalAccessException | IllegalArgumentException | InvocationTargetException | NoSuchMethodException | SecurityException e) {
+                return null;
+            }
+        }
+
+        private List<CommandAnnotation> getAnnotations() {
+            return annotations;
+        }
     }
 
     public void sendUsage(CommandSender sender, String command) {

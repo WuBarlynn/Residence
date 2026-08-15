@@ -57,7 +57,6 @@ import com.bekvon.bukkit.residence.utils.GetTime;
 import com.bekvon.bukkit.residence.utils.Utils;
 
 import net.Zrips.CMILib.Colors.CMIChatColor;
-import net.Zrips.CMILib.Container.CMINumber;
 import net.Zrips.CMILib.Container.PageInfo;
 import net.Zrips.CMILib.RawMessages.RawMessage;
 import net.Zrips.CMILib.Version.Version;
@@ -1076,7 +1075,7 @@ public class ResidenceManager implements ResidenceInterface {
         receiver.getPermissions().applyTemplate(reqPlayer, source.getPermissions(), resadmin);
     }
 
-    public Map<String, Object> save() {
+    public synchronized Map<String, Object> save() {
         clearSaveChache();
         Map<String, Object> worldmap = new LinkedHashMap<>();
         for (String worldName : getWorldNames()) {
@@ -1100,29 +1099,32 @@ public class ResidenceManager implements ResidenceInterface {
 
     private void clearSaveChache() {
         optimizeMessages.clear();
+        optimizeMessageIds.clear();
         optimizeFlags.clear();
+        optimizeFlagIds.clear();
     }
 
     // Optimizing save file
     HashMap<String, List<MinimizeMessages>> optimizeMessages = new HashMap<String, List<MinimizeMessages>>();
+    HashMap<String, Map<MessageCacheKey, MinimizeMessages>> optimizeMessageIds = new HashMap<String, Map<MessageCacheKey, MinimizeMessages>>();
     HashMap<String, List<MinimizeFlags>> optimizeFlags = new HashMap<String, List<MinimizeFlags>>();
+    HashMap<String, Map<FlagCacheKey, MinimizeFlags>> optimizeFlagIds = new HashMap<String, Map<FlagCacheKey, MinimizeFlags>>();
 
-    public MinimizeMessages addMessageToTempCache(String world, String enter, String leave) {
-        List<MinimizeMessages> ls = optimizeMessages.get(world);
-        if (ls == null)
-            ls = new ArrayList<MinimizeMessages>();
-        for (MinimizeMessages one : ls) {
-            if (!one.add(enter, leave))
-                continue;
-            return one;
-        }
-        MinimizeMessages m = new MinimizeMessages(ls.size() + 1, enter, leave);
+    public synchronized MinimizeMessages addMessageToTempCache(String world, String enter, String leave) {
+        List<MinimizeMessages> ls = optimizeMessages.computeIfAbsent(world, key -> new ArrayList<MinimizeMessages>());
+        Map<MessageCacheKey, MinimizeMessages> ids = optimizeMessageIds.computeIfAbsent(world, key -> new HashMap<MessageCacheKey, MinimizeMessages>());
+        MessageCacheKey key = new MessageCacheKey(enter, leave);
+        MinimizeMessages cached = ids.get(key);
+        if (cached != null)
+            return cached;
+
+        MinimizeMessages m = new MinimizeMessages(ls.size() + 1, key.enter, key.leave);
         ls.add(m);
-        optimizeMessages.put(world, ls);
+        ids.put(key, m);
         return m;
     }
 
-    public HashMap<Integer, Object> getMessageCatch(String world) {
+    public synchronized HashMap<Integer, Object> getMessageCatch(String world) {
         HashMap<Integer, Object> t = new HashMap<Integer, Object>();
         List<MinimizeMessages> ls = optimizeMessages.get(world);
         if (ls == null)
@@ -1136,24 +1138,72 @@ public class ResidenceManager implements ResidenceInterface {
         return t;
     }
 
-    public MinimizeFlags addFlagsTempCache(String world, Map<String, Boolean> map) {
+    public synchronized MinimizeFlags addFlagsTempCache(String world, Map<String, Boolean> map) {
         if (world == null)
             return null;
-        List<MinimizeFlags> ls = optimizeFlags.get(world);
-        if (ls == null)
-            ls = new ArrayList<MinimizeFlags>();
-        for (MinimizeFlags one : ls) {
-            if (!one.add(map))
-                continue;
-            return one;
-        }
-        MinimizeFlags m = new MinimizeFlags(ls.size() + 1, map);
+        List<MinimizeFlags> ls = optimizeFlags.computeIfAbsent(world, key -> new ArrayList<MinimizeFlags>());
+        Map<FlagCacheKey, MinimizeFlags> ids = optimizeFlagIds.computeIfAbsent(world, key -> new HashMap<FlagCacheKey, MinimizeFlags>());
+        FlagCacheKey key = new FlagCacheKey(map);
+        MinimizeFlags cached = ids.get(key);
+        if (cached != null)
+            return cached;
+
+        MinimizeFlags m = new MinimizeFlags(ls.size() + 1, key.flags);
         ls.add(m);
-        optimizeFlags.put(world, ls);
+        ids.put(key, m);
         return m;
     }
 
-    public HashMap<Integer, Object> getFlagsCatch(String world) {
+    private static final class MessageCacheKey {
+        private final String enter;
+        private final String leave;
+
+        private MessageCacheKey(String enter, String leave) {
+            this.enter = enter == null ? "" : enter;
+            this.leave = leave == null ? "" : leave;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj)
+                return true;
+            if (!(obj instanceof MessageCacheKey))
+                return false;
+            MessageCacheKey other = (MessageCacheKey) obj;
+            return enter.equals(other.enter) && leave.equals(other.leave);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * enter.hashCode() + leave.hashCode();
+        }
+    }
+
+    private static final class FlagCacheKey {
+        private final Map<String, Boolean> flags;
+        private final int hashCode;
+
+        private FlagCacheKey(Map<String, Boolean> flags) {
+            this.flags = new HashMap<String, Boolean>(flags);
+            this.hashCode = this.flags.hashCode();
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj)
+                return true;
+            if (!(obj instanceof FlagCacheKey))
+                return false;
+            return flags.equals(((FlagCacheKey) obj).flags);
+        }
+
+        @Override
+        public int hashCode() {
+            return hashCode;
+        }
+    }
+
+    public synchronized HashMap<Integer, Object> getFlagsCatch(String world) {
         HashMap<Integer, Object> t = new HashMap<Integer, Object>();
         List<MinimizeFlags> ls = optimizeFlags.get(world);
         if (ls == null)
@@ -1238,101 +1288,105 @@ public class ResidenceManager implements ResidenceInterface {
         return worldnames;
     }
 
-    int batchSize = 1000000;
-    ExecutorService executorService = null;
-
-    public void load(Map<String, Object> root) throws Exception {
+    public synchronized void load(Map<String, Object> root) throws Exception {
         if (root == null)
             return;
         residences.clear();
 
-        int numCores = Runtime.getRuntime().availableProcessors();
+        int loadWorkerCount = Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
+        ExecutorService executorService = Executors.newFixedThreadPool(loadWorkerCount);
 
-        numCores = CMINumber.clamp(numCores, 1, numCores - 1);
+        try {
+            for (Entry<String, Object> worldSet : root.entrySet()) {
 
-        executorService = Executors.newFixedThreadPool(numCores);
-        batchSize = (int) Math.ceil(root.entrySet().size() / (double) numCores);
+                long time = System.currentTimeMillis();
 
-        for (Entry<String, Object> worldSet : root.entrySet()) {
+                String worldName = worldSet.getKey();
+                @SuppressWarnings("unchecked")
+                Map<String, Object> reslist = (Map<String, Object>) worldSet.getValue();
 
-            long time = System.currentTimeMillis();
-
-            String worldName = worldSet.getKey();
-            @SuppressWarnings("unchecked")
-            Map<String, Object> reslist = (Map<String, Object>) worldSet.getValue();
-
-            if (!plugin.isDisabledWorld(worldName) && !plugin.getConfigManager().CleanerStartupLog)
-                lm.consoleMessage("Loading " + worldName + " data into memory...");
-            if (reslist != null) {
-                try {
-                    chunkResidences.put(worldName, multithreadLoadMap(worldName, reslist));
-                } catch (Exception ex) {
-                    lm.consoleMessage("Error in loading save file for world: " + worldName);
-                    if (plugin.getConfigManager().stopOnSaveError())
-                        throw (ex);
+                if (!plugin.isDisabledWorld(worldName) && !plugin.getConfigManager().CleanerStartupLog)
+                    lm.consoleMessage("Loading " + worldName + " data into memory...");
+                if (reslist != null) {
+                    try {
+                        chunkResidences.put(worldName, multithreadLoadMap(worldName, reslist, executorService, loadWorkerCount));
+                    } catch (Exception ex) {
+                        lm.consoleMessage("Error in loading save file for world: " + worldName);
+                        if (plugin.getConfigManager().stopOnSaveError())
+                            throw (ex);
+                    }
                 }
+
+                long pass = System.currentTimeMillis() - time;
+                String pastTime = pass > 1000 ? String.format("%.2f", (pass / 1000F)) + " sec" : pass + " ms";
+
+                if (!plugin.isDisabledWorld(worldName))
+                    lm.consoleMessage("Loaded &e" + worldName + "&f data into memory. (&e" + pastTime + "&f) -> " + (reslist == null ? "?" : reslist.size())
+                            + " residences");
             }
-
-            long pass = System.currentTimeMillis() - time;
-            String pastTime = pass > 1000 ? String.format("%.2f", (pass / 1000F)) + " sec" : pass + " ms";
-
-            if (!plugin.isDisabledWorld(worldName))
-                lm.consoleMessage("Loaded &e" + worldName + "&f data into memory. (&e" + pastTime + "&f) -> " + (reslist == null ? "?" : reslist.size())
-                        + " residences");
+        } finally {
+            executorService.shutdown();
+            clearLoadChache();
         }
-
-        executorService.shutdown();
-
-        clearLoadChache();
     }
 
-    int chunkCount = 0;
-
-    public Map<ChunkRef, List<ClaimedResidence>> multithreadLoadMap(String worldName, Map<String, Object> root) throws InterruptedException, ExecutionException {
+    private Map<ChunkRef, List<ClaimedResidence>> multithreadLoadMap(String worldName, Map<String, Object> root, ExecutorService executorService,
+            int loadWorkerCount) throws InterruptedException, ExecutionException {
         Map<ChunkRef, List<ClaimedResidence>> retRes = new ConcurrentHashMap<>();
 
-        if (root == null) {
+        if (root == null || root.isEmpty())
             return retRes;
-        }
-
-        chunkCount = 0;
 
         List<Future<Void>> futures = new ArrayList<>();
-
-        batchSize = CMINumber.clamp(batchSize, 500, root.entrySet().size());
-
-        int i = 0;
-
-        List<Entry<String, Object>> batch = new ArrayList<>();
-
-        int total = root.entrySet().size() - 1;
+        int batchSize = Math.max(1, (int) Math.ceil(root.size() / (double) loadWorkerCount));
+        List<Entry<String, Object>> batch = new ArrayList<>(batchSize);
 
         for (Entry<String, Object> entry : root.entrySet()) {
             batch.add(entry);
 
-            if (batch.size() < batchSize && i < total) {
-                i++;
+            if (batch.size() < batchSize)
                 continue;
-            }
 
-            List<Entry<String, Object>> currentBatch = batch;
-            batch = new ArrayList<>();
-            i++;
-
-            futures.add(processBatch(worldName, currentBatch, retRes));
+            futures.add(processBatch(worldName, batch, retRes, executorService));
+            batch = new ArrayList<>(batchSize);
         }
 
         if (!batch.isEmpty())
-            futures.add(processBatch(worldName, batch, retRes));
+            futures.add(processBatch(worldName, batch, retRes, executorService));
 
-        for (Future<Void> future : futures) {
-            future.get();
+        try {
+            for (Future<Void> future : futures)
+                future.get();
+        } catch (InterruptedException ex) {
+            for (Future<Void> future : futures)
+                future.cancel(true);
+            awaitBatchCompletion(futures);
+            Thread.currentThread().interrupt();
+            throw ex;
+        } catch (ExecutionException ex) {
+            for (Future<Void> future : futures)
+                future.cancel(true);
+            awaitBatchCompletion(futures);
+            throw ex;
         }
 
         return retRes;
     }
 
-    private Future<Void> processBatch(String worldName, List<Entry<String, Object>> currentBatch, Map<ChunkRef, List<ClaimedResidence>> retRes) {
+    private void awaitBatchCompletion(List<Future<Void>> futures) {
+        for (Future<Void> future : futures) {
+            try {
+                future.get();
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (ExecutionException ignored) {
+            }
+        }
+    }
+
+    private Future<Void> processBatch(String worldName, List<Entry<String, Object>> currentBatch, Map<ChunkRef, List<ClaimedResidence>> retRes,
+            ExecutorService executorService) {
         return executorService.submit(() -> {
             for (Entry<String, Object> currentEntry : currentBatch) {
                 try {
@@ -1351,17 +1405,7 @@ public class ResidenceManager implements ResidenceInterface {
                         residence.getPermissions().setOwner(plugin.getServerLandName(), false);
                     }
 
-                    String resName = currentEntry.getKey().toLowerCase();
-
-                    int increment = getNameIncrement(resName);
-
-                    if (residence.getResidenceName() == null)
-                        residence.setName(currentEntry.getKey());
-
-                    if (increment > 0) {
-                        residence.setName(residence.getResidenceName() + increment);
-                        resName += increment;
-                    }
+                    reserveResidenceName(currentEntry.getKey(), residence);
 
                     List<ChunkRef> chunks = residence.getChunks();
 
@@ -1375,14 +1419,11 @@ public class ResidenceManager implements ResidenceInterface {
                                 v = new ArrayList<>(1);
                             }
                             v.add(residence);
-                            chunkCount++;
                             return v;
                         });
                     }
 
                     plugin.getPlayerManager().addResidence(residence.getOwnerUUID(), residence);
-
-                    residences.put(resName, residence);
                 } catch (Exception ex) {
                     lm.consoleMessage(CMIChatColor.RED + "Failed to load residence (" + currentEntry.getKey() + ")! Reason:" + ex.getMessage() + " Error Log:");
                     Logger.getLogger(ResidenceManager.class.getName()).log(Level.SEVERE, null, ex);
@@ -1456,6 +1497,22 @@ public class ResidenceManager implements ResidenceInterface {
         }
 
         return retRes;
+    }
+
+    private String reserveResidenceName(String persistedName, ClaimedResidence residence) {
+        String originalName = persistedName.toLowerCase();
+        if (residence.getResidenceName() == null)
+            residence.setName(persistedName);
+
+        for (int increment = 0; increment <= 1000; increment++) {
+            String resName = increment == 0 ? originalName : originalName + increment;
+            if (residences.putIfAbsent(resName, residence) != null && increment < 1000)
+                continue;
+            if (increment > 0)
+                residence.setName(residence.getResidenceName() + increment);
+            return resName;
+        }
+        return originalName;
     }
 
     private int getNameIncrement(String name) {
@@ -1760,12 +1817,12 @@ public class ResidenceManager implements ResidenceInterface {
 
         @Override
         public int hashCode() {
-            return x ^ z;
+            return 31 * x + z;
         }
 
         /**
          * Useful for debug
-         * 
+         *
          * @return
          */
         @Override
