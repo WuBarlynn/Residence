@@ -19,6 +19,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -1358,31 +1359,31 @@ public class ResidenceManager implements ResidenceInterface {
             for (Future<Void> future : futures)
                 future.get();
         } catch (InterruptedException ex) {
-            for (Future<Void> future : futures)
-                future.cancel(true);
-            awaitBatchCompletion(futures);
+            cancelBatches(futures, executorService);
             Thread.currentThread().interrupt();
             throw ex;
         } catch (ExecutionException ex) {
-            for (Future<Void> future : futures)
-                future.cancel(true);
-            awaitBatchCompletion(futures);
+            cancelBatches(futures, executorService);
             throw ex;
         }
 
         return retRes;
     }
 
-    private void awaitBatchCompletion(List<Future<Void>> futures) {
-        for (Future<Void> future : futures) {
+    private void cancelBatches(List<Future<Void>> futures, ExecutorService executorService) {
+        for (Future<Void> future : futures)
+            future.cancel(true);
+        executorService.shutdownNow();
+        boolean interrupted = false;
+        while (!executorService.isTerminated()) {
             try {
-                future.get();
+                executorService.awaitTermination(1, TimeUnit.DAYS);
             } catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-                return;
-            } catch (ExecutionException ignored) {
+                interrupted = true;
             }
         }
+        if (interrupted)
+            Thread.currentThread().interrupt();
     }
 
     private Future<Void> processBatch(String worldName, List<Entry<String, Object>> currentBatch, Map<ChunkRef, List<ClaimedResidence>> retRes,
@@ -1506,13 +1507,13 @@ public class ResidenceManager implements ResidenceInterface {
 
         for (int increment = 0; increment <= 1000; increment++) {
             String resName = increment == 0 ? originalName : originalName + increment;
-            if (residences.putIfAbsent(resName, residence) != null && increment < 1000)
+            if (residences.putIfAbsent(resName, residence) != null)
                 continue;
             if (increment > 0)
                 residence.setName(residence.getResidenceName() + increment);
             return resName;
         }
-        return originalName;
+        throw new IllegalStateException("Could not allocate a unique residence name for " + persistedName);
     }
 
     private int getNameIncrement(String name) {
